@@ -18,6 +18,7 @@ const MAX_ROWS = 50
 const TICK_MS = 1000
 const TOAST_MS = 8000
 const PULSE_KEEP = 400
+const ANSWER_KEEP = 600
 const SPARK_BUCKET_MS = 10_000
 // A finished agent stays animated this long (hop, sparkle), then turns into a
 // light static picture.
@@ -41,6 +42,7 @@ const agents = atom({ plugin: 'subagent-monitor', key: 'agents' } as const, [], 
   shape: 'agents-2',
 })
 const pulses = atom({ plugin: 'subagent-monitor', key: 'pulses' } as const, [])
+const expanded = atom({ plugin: 'subagent-monitor', key: 'expanded' } as const, [])
 const tick = atom({ plugin: 'subagent-monitor', key: 'tick' } as const, 0)
 const isClosedByPerson = atom(
   { plugin: 'subagent-monitor', key: 'isClosedByPerson' } as const,
@@ -165,6 +167,25 @@ function clip(text: string, max = 60): string {
   const line = text.replace(/\s+/g, ' ').trim()
 
   return line.length > max ? `${line.slice(0, max - 1)}…` : line
+}
+
+function clipAnswer(answer: string): string | undefined {
+  const text = answer.trim()
+  if (text === '') return undefined
+
+  return text.length > ANSWER_KEEP ? `${text.slice(0, ANSWER_KEEP - 1)}…` : text
+}
+
+function clockTime(at: number): string {
+  try {
+    return new Date(at).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+  } catch {
+    return new Date(at).toISOString().slice(11, 19)
+  }
 }
 
 function hostOf(url: string): string {
@@ -346,7 +367,18 @@ async function onTick($: $): Promise<void> {
   }
 }
 
-// Runs from a press only: $.ui.view needs the person's own input.
+// Graphical surfaces have no main view to switch, so a press opens the
+// card's details in place instead.
+async function toggleDetails($: $, id: string): Promise<void> {
+  await update($, expanded, list =>
+    list.includes(id)
+      ? list.filter(one => one !== id)
+      : [...list, id].slice(-MAX_ROWS),
+  )
+}
+
+// Runs from a press only: $.ui.view needs the person's own input, and only
+// the terminal draws a main view it can switch.
 async function showAgent($: $, agentId: string | undefined): Promise<void> {
   const moved = await $.ui.view(agentId === undefined ? {} : { agentId })
   if (moved.deny !== undefined) {
@@ -464,6 +496,7 @@ export const register: Register = on => {
     if (e.reason === 'clear') {
       await update($, agents, () => [])
       await update($, pulses, () => [])
+      await update($, expanded, () => [])
       await update($, isClosedByPerson, () => false)
     }
 
@@ -581,11 +614,12 @@ export const register: Register = on => {
           ? 'killed'
           : 'failed'
 
+    const answer = clipAnswer(e.answer)
     await update($, agents, rows =>
       patch(rows, id, row =>
         row.isTeammate === true
-          ? { ...row, status: 'idle', isToolRunning: false }
-          : { ...row, status, endedAt: now, isToolRunning: false },
+          ? { ...row, status: 'idle', isToolRunning: false, answer: answer ?? row.answer }
+          : { ...row, status, endedAt: now, isToolRunning: false, answer: answer ?? row.answer },
       ),
     )
     await notifyFinished($)
@@ -602,10 +636,14 @@ export const register: Register = on => {
     // Subscribes the pane to the 1-second tick (timers, terminal animation).
     const frame = await read($, tick)
     const beats = await read($, pulses)
+    const openIds = new Set(await read($, expanded))
     const now = await $.clock.now()
     const viewed = e.props.view.agentId
     const columns = e.props.bodyColumns
     const isTerminal = e.surface === 'terminal'
+    // Only the terminal draws a main view that can switch to an agent's
+    // transcript; elsewhere a press opens the card's details.
+    const canView = isTerminal
 
     // Named steps on graphical surfaces, cells on the terminal.
     const space = (step: 'xs' | 'sm' | 'md', cells: number): Space =>
@@ -618,8 +656,10 @@ export const register: Register = on => {
     // Cells one card gets across, which decides how much it shows per line.
     const cardColumns = Math.floor(columns / gridColumns)
 
-    const open = (row: AgentRow) => () =>
-      void showAgent($, row.id === viewed ? undefined : row.id)
+    const press = (row: AgentRow) =>
+      canView
+        ? () => void showAgent($, row.id === viewed ? undefined : row.id)
+        : () => void toggleDetails($, row.id)
 
     const statusMark = (row: AgentRow): string =>
       row.status === 'running' && isTerminal ? spinnerFrame(frame) : MARK[row.status]
@@ -679,15 +719,53 @@ export const register: Register = on => {
       )
 
     const title = (row: AgentRow) => (
-      <Button key={row.id} plain dimColor={!isActive(row.status)} onPress={open(row)}>
+      <Button key={row.id} plain dimColor={!isActive(row.status)} onPress={press(row)}>
         <Text weight="semibold">{row.type}</Text>
-        {row.id === viewed ? (
+        {!canView ? (
+          <Text dimColor> {openIds.has(row.id) ? '▾' : '▸'}</Text>
+        ) : row.id === viewed ? (
           <Text color={VIEWED}> ◀</Text>
         ) : (
           <Text dimColor> ↗</Text>
         )}
       </Button>
     )
+
+    // The opened card's details: what a transcript would have told you.
+    const details = (row: AgentRow) => {
+      const lines = [
+        ['Model', row.model],
+        ['Started', `${clockTime(row.startedAt)} · ${plural(row.toolCount, 'tool')}`],
+        ['Last tool', row.activity],
+        ['Agent id', row.id],
+      ].filter((line): line is [string, string] => line[1] !== undefined)
+
+      return (
+        <Box
+          flexDirection="column"
+          rowGap={space('xs', 0)}
+          marginTop={space('xs', 0)}
+          paddingLeft={space('sm', 1)}
+        >
+          {lines.map(([label, value]) => (
+            <Text size="caption" wrap="truncate-end">
+              <Text dimColor>{label}  </Text>
+              {value}
+            </Text>
+          ))}
+          {row.answer !== undefined ? (
+            <Box flexDirection="column">
+              <Text dimColor size="caption">
+                Answer
+              </Text>
+              <Text size="caption" wrap="wrap">
+                {row.answer}
+              </Text>
+            </Box>
+          ) : undefined}
+        </Box>
+      )
+    }
 
     const clock = (row: AgentRow) => (
       <Text color={COLOR[row.status]} dimColor={COLOR[row.status] === undefined} tabular>
@@ -699,6 +777,7 @@ export const register: Register = on => {
       const active = isActive(row.status)
       const isViewed = row.id === viewed
       const isSnug = cardColumns - indent < REGULAR_FROM
+      const isOpen = !canView && openIds.has(row.id)
       const meta = [...modelParts(row), ...costParts(row)]
 
       return (
@@ -727,7 +806,7 @@ export const register: Register = on => {
               {title(row)}
               {clock(row)}
             </Box>
-            <Text dimColor={!active} wrap="truncate-end">
+            <Text dimColor={!active} wrap={isOpen ? 'wrap' : 'truncate-end'}>
               {row.description}
             </Text>
             {stateLine(row)}
@@ -749,6 +828,7 @@ export const register: Register = on => {
                 {meta.join(' · ')}
               </Text>
             ) : undefined}
+            {isOpen ? details(row) : undefined}
           </Box>
         </Box>
       )
@@ -775,6 +855,14 @@ export const register: Register = on => {
               {[LABEL[row.status], ...costParts(row).slice(0, 1)].join(' · ')}
             </Text>
           )}
+          {!canView && openIds.has(row.id) ? (
+            <Box flexDirection="column">
+              <Text dimColor size="caption" wrap="wrap">
+                {row.description}
+              </Text>
+              {details(row)}
+            </Box>
+          ) : undefined}
         </Box>
       </Box>
     )

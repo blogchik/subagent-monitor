@@ -32,6 +32,8 @@ export type AgentRow = {
   activity?: string
   /** Whether that tool is still running. */
   isToolRunning?: boolean
+  /** The start of the agent's final answer, once it has one. */
+  answer?: string
   /** Whether the finish toast was shown. */
   isNotified?: boolean
 }
@@ -42,6 +44,8 @@ declare module 'claude-code' {
       agents: Shaped<AgentRow[]>
       /** When subagents called tools: feeds the activity sparkline. */
       pulses: number[]
+      /** Ids of the cards whose details are open (graphical surfaces). */
+      expanded: string[]
       /** Grows every second: redraws the timers and the terminal animation. */
       tick: number
       /** Whether the person closed the pane: then it does not open by itself. */

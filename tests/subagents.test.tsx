@@ -313,22 +313,68 @@ test('the status follows $.agent.list()', async ($, on) => {
   await ui.unmount()
 })
 
-test('pressing a card opens its transcript, pressing again goes back to main', async ($, on) => {
+test('in the terminal a press opens the transcript, a second goes back to main', async ($, on) => {
   mock.clock(on, { now: 0 })
   const world = engine(on)
   await start($)
   await $.agent.spawn(spawnInput())
 
-  const main = await $.ui.mount({ ...pane(), surface: 'desktop' })
+  const main = await $.ui.mount({ ...pane(), surface: 'terminal' })
+  expect((await main.find({ key: 'a1' }))?.text).toMatch(/↗/)
   await main.press({ key: 'a1' })
   expect(world.views[0]).toEqual({ agentId: 'a1' })
   await main.unmount()
 
-  const viewing = await $.ui.mount({ ...pane('a1'), surface: 'desktop' })
+  const viewing = await $.ui.mount({ ...pane('a1'), surface: 'terminal' })
   expect(await viewing.find({ key: 'main' })).toBeDefined()
   await viewing.press({ key: 'a1' })
   expect(world.views[1]).toEqual({})
   await viewing.unmount()
+})
+
+test('on graphical surfaces a press opens and closes the details in place', async ($, on) => {
+  mock.clock(on, { now: 0 })
+  const world = engine(on)
+  await start($)
+  await $.agent.spawn(spawnInput())
+  await step($, 'a1', 'high')
+
+  for (const surface of ['desktop', 'vscode'] as const) {
+    const ui = await $.ui.mount({ ...pane(), surface })
+    expect((await ui.find({ key: 'a1' }))?.text).toMatch(/▸/)
+    expect(await ui.find({ type: 'Text', text: /Agent id/ })).toBeUndefined()
+
+    await ui.press({ key: 'a1' })
+    expect((await ui.find({ key: 'a1' }))?.text).toMatch(/▾/)
+    expect(await ui.find({ type: 'Text', text: /Agent id\s+a1/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Model\s+claude-haiku-5-5/ })).toBeDefined()
+
+    await ui.press({ key: 'a1' })
+    expect(await ui.find({ type: 'Text', text: /Agent id/ })).toBeUndefined()
+    await ui.unmount()
+  }
+
+  expect(world.views).toHaveLength(0)
+})
+
+test("the details show the start of the agent's answer once it finishes", async ($, on) => {
+  mock.clock(on, { now: 0 })
+  engine(on)
+  await start($)
+  await $.agent.spawn(spawnInput())
+  await $.turn.complete({
+    answer: 'Found 12 endpoints under src/routes.',
+    durationMs: 1000,
+    isAborted: false,
+    turnId: 't1',
+    agentId: 'a1',
+    reason: 'answer',
+  })
+
+  const ui = await $.ui.mount({ ...pane(), surface: 'desktop' })
+  await ui.press({ key: 'a1' })
+  expect(await ui.find({ type: 'Text', text: /Found 12 endpoints under src\/routes\./ })).toBeDefined()
+  await ui.unmount()
 })
 
 test('a nested agent follows its parent', async ($, on) => {
