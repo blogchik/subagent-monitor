@@ -1,0 +1,7 @@
+{
+  "name": "subagent-monitor",
+  "version": "0.2.0",
+  "author": { "name": "Abduroziq" },
+  "description": "Shows running subagents in a side panel: a unique animated creature per agent, live activity, model, effort, tokens and time.",
+  "types": "./types/index.d.ts"
+}

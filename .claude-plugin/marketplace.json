@@ -1,0 +1,14 @@
+{
+  "name": "subagent-monitor-local",
+  "owner": { "name": "Abduroziq" },
+  "metadata": {
+    "description": "A local marketplace for the subagent-monitor mod."
+  },
+  "plugins": [
+    {
+      "name": "subagent-monitor",
+      "source": "./",
+      "description": "Shows running subagents in a side panel: a unique animated creature per agent, live activity, model, effort, tokens and time."
+    }
+  ]
+}
