@@ -46,6 +46,8 @@ declare module 'claude-code' {
       pulses: number[]
       /** Ids of the cards whose details are open (graphical surfaces). */
       expanded: string[]
+      /** The agent whose transcript the transcript pane shows. */
+      transcriptOf: string | null
       /** Grows every second: redraws the timers and the terminal animation. */
       tick: number
       /** Whether the person closed the pane: then it does not open by itself. */

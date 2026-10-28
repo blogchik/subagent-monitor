@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { AgentInfo, AgentSpawnInput, On, TurnUsage } from 'claude-code'
+import type { AgentInfo, AgentSpawnInput, On, SessionMessage, TurnUsage } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 
 const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
@@ -18,6 +18,43 @@ const pane = (agentId?: string, bodyColumns = 60) =>
       view: agentId === undefined ? {} : { agentId },
     },
   }) as const
+
+const transcriptPane = (surface: 'terminal' | 'desktop') =>
+  ({
+    plugin: 'subagent-monitor',
+    component: 'Pane',
+    requestId: 'subagent-transcript',
+    surface,
+    props: {
+      title: 'Explore · transcript',
+      isFocused: false,
+      bodyColumns: 60,
+      placement: 'dock',
+      scroll: { offset: 0, bodyRows: 30 },
+      view: {},
+    },
+  }) as const
+
+const CONVERSATION: SessionMessage[] = [
+  { role: 'user', text: 'Find the routes', toolUses: [] },
+  {
+    role: 'assistant',
+    text: 'Looking around.',
+    toolUses: [
+      { tool_use_id: 't1', tool: 'Grep', input: { pattern: 'router' }, text: '3 matches' },
+      {
+        tool_use_id: 't2',
+        tool: 'Read',
+        input: { file_path: '/src/app.ts' },
+        text: 'File not found',
+        isError: true,
+      },
+      { tool_use_id: 't3', tool: 'Glob', input: { pattern: '**/*.ts' } },
+    ],
+  },
+  { role: 'user', text: '', toolUses: [] },
+  { role: 'assistant', text: 'Found **3** routes.', toolUses: [] },
+]
 
 const spawnInput = (over: Partial<AgentSpawnInput> = {}): AgentSpawnInput => ({
   tool_use_id: 'call-1',
@@ -51,7 +88,9 @@ function engine(on: On, list: () => AgentInfo[] = () => []) {
   const toasts: string[] = []
   const views: { agentId?: string }[] = []
   const opened: string[] = []
+  const closed: string[] = []
   let stepUsage: TurnUsage | null = usage(1000, 200, 8000)
+  let conversation: SessionMessage[] | { deny: string } = CONVERSATION
 
   on('command.register', () => ({ value: { command: 'subagents' } }))
   on('ui.open', (_, e) => {
@@ -59,7 +98,12 @@ function engine(on: On, list: () => AgentInfo[] = () => []) {
 
     return { value: { isPlaced: true } }
   })
-  on('ui.close', () => ({ value: undefined }))
+  on('ui.close', (_, e) => {
+    closed.push(e.id)
+
+    return { value: undefined }
+  })
+  on('session.messages', () => ({ value: conversation }))
   on('ui.toast', (_, e) => {
     toasts.push(e.text)
 
@@ -93,8 +137,12 @@ function engine(on: On, list: () => AgentInfo[] = () => []) {
     toasts,
     views,
     opened,
+    closed,
     setUsage: (next: TurnUsage | null) => {
       stepUsage = next
+    },
+    setConversation: (next: SessionMessage[] | { deny: string }) => {
+      conversation = next
     },
   }
 }
@@ -375,6 +423,80 @@ test("the details show the start of the agent's answer once it finishes", async 
   await ui.press({ key: 'a1' })
   expect(await ui.find({ type: 'Text', text: /Found 12 endpoints under src\/routes\./ })).toBeDefined()
   await ui.unmount()
+})
+
+// Opens a1's details and presses its transcript button on the desktop.
+async function openTranscriptOfA1($: Engine): Promise<void> {
+  const ui = await $.ui.mount({ ...pane(), surface: 'desktop' })
+  await ui.press({ key: 'a1' })
+  await ui.press({ key: 'transcript-a1' })
+  await ui.unmount()
+}
+
+test("the details' button opens the transcript pane", async ($, on) => {
+  mock.clock(on, { now: 0 })
+  const world = engine(on)
+  await start($)
+  await $.agent.spawn(spawnInput())
+  await openTranscriptOfA1($)
+
+  expect(world.opened).toContain('subagent-transcript')
+
+  const ui = await $.ui.mount({ ...pane(), surface: 'desktop' })
+  expect((await ui.find({ key: 'transcript-a1' }))?.text).toMatch(/Transcript open/)
+  await ui.unmount()
+})
+
+test("the transcript pane draws the agent's conversation", async ($, on) => {
+  mock.clock(on, { now: 0 })
+  engine(on)
+  await start($)
+  await $.agent.spawn(spawnInput())
+  await openTranscriptOfA1($)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount(transcriptPane(surface))
+    expect(await ui.find({ type: 'Text', text: /^Explore/ })).toBeDefined()
+    expect(await ui.find({ type: 'Markdown', text: /Find the routes/ })).toBeDefined()
+    expect(await ui.find({ type: 'Markdown', text: /Looking around\./ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /✓ Grep · router/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /✗ Read · app\.ts — File not found/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /◌ Glob · \*\*\/\*\.ts/ })).toBeDefined()
+    expect(await ui.find({ type: 'Markdown', text: /Found \*\*3\*\* routes\./ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test("a transcript that can't be read says why", async ($, on) => {
+  mock.clock(on, { now: 0 })
+  const world = engine(on)
+  await start($)
+  await $.agent.spawn(spawnInput())
+  await openTranscriptOfA1($)
+  world.setConversation({ deny: 'no agent a1 in this session' })
+
+  const ui = await $.ui.mount(transcriptPane('desktop'))
+  expect(
+    await ui.find({ type: 'Text', text: /Couldn't read this transcript: no agent a1 in this session/ }),
+  ).toBeDefined()
+  await ui.unmount()
+})
+
+test('Close shuts the transcript pane', async ($, on) => {
+  mock.clock(on, { now: 0 })
+  const world = engine(on)
+  await start($)
+  await $.agent.spawn(spawnInput())
+  await openTranscriptOfA1($)
+
+  const ui = await $.ui.mount(transcriptPane('desktop'))
+  await ui.press({ key: 'close' })
+  await ui.unmount()
+
+  expect(world.closed).toContain('subagent-transcript')
+  const after = await $.ui.mount(transcriptPane('desktop'))
+  expect(await after.find({ type: 'Text', text: /press Open transcript/ })).toBeDefined()
+  await after.unmount()
 })
 
 test('a nested agent follows its parent', async ($, on) => {

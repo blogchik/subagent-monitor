@@ -4,6 +4,7 @@ import type {
   Color,
   EngineInterface,
   Register,
+  SessionMessage,
   Space,
   TurnUsage,
 } from 'claude-code'
@@ -14,6 +15,10 @@ import type { Mood } from './creature'
 
 const PANE = 'subagents'
 const TITLE = 'Subagents'
+const TRANSCRIPT_PANE = 'subagent-transcript'
+// The transcript pane shows this many of the latest steps, each text cut here.
+const TRANSCRIPT_STEPS = 80
+const TRANSCRIPT_TEXT_KEEP = 4000
 const MAX_ROWS = 50
 const TICK_MS = 1000
 const TOAST_MS = 8000
@@ -43,6 +48,10 @@ const agents = atom({ plugin: 'subagent-monitor', key: 'agents' } as const, [], 
 })
 const pulses = atom({ plugin: 'subagent-monitor', key: 'pulses' } as const, [])
 const expanded = atom({ plugin: 'subagent-monitor', key: 'expanded' } as const, [])
+const transcriptOf = atom(
+  { plugin: 'subagent-monitor', key: 'transcriptOf' } as const,
+  null,
+)
 const tick = atom({ plugin: 'subagent-monitor', key: 'tick' } as const, 0)
 const isClosedByPerson = atom(
   { plugin: 'subagent-monitor', key: 'isClosedByPerson' } as const,
@@ -377,6 +386,59 @@ async function toggleDetails($: $, id: string): Promise<void> {
   )
 }
 
+async function openTranscript($: $, row: AgentRow): Promise<void> {
+  await update($, transcriptOf, () => row.id)
+  await $.ui.open({ id: TRANSCRIPT_PANE, title: `${row.type} · transcript` })
+}
+
+async function closeTranscript($: $): Promise<void> {
+  // A plugin's own close skips its own ui.close hook, so clear the id here.
+  await update($, transcriptOf, () => null)
+  await $.ui.close({ id: TRANSCRIPT_PANE })
+}
+
+type Step =
+  | { kind: 'task' | 'message' | 'say'; text: string }
+  | { kind: 'tool'; label: string; state: 'running' | 'ok' | 'error'; error?: string }
+
+const clipText = (text: string): string =>
+  text.length > TRANSCRIPT_TEXT_KEEP
+    ? `${text.slice(0, TRANSCRIPT_TEXT_KEEP - 1)}…`
+    : text
+
+// An agent's conversation as steps: its task, what it said, each tool call.
+function stepsOf(messages: readonly SessionMessage[]): Step[] {
+  const steps: Step[] = []
+  let hasTask = false
+  for (const message of messages) {
+    const text = message.text.trim()
+    if (message.role === 'user') {
+      // Tool results ride on user rows with no text of their own.
+      if (text === '') continue
+      steps.push({ kind: hasTask ? 'message' : 'task', text: clipText(text) })
+      hasTask = true
+      continue
+    }
+    if (text !== '') steps.push({ kind: 'say', text: clipText(text) })
+    for (const use of message.toolUses) {
+      const state =
+        use.isError === true
+          ? 'error'
+          : use.text === undefined && use.result === undefined
+            ? 'running'
+            : 'ok'
+      steps.push({
+        kind: 'tool',
+        label: describeTool(use.tool, use.input),
+        state,
+        error: state === 'error' ? clip(use.text ?? '', 160) : undefined,
+      })
+    }
+  }
+
+  return steps
+}
+
 // Runs from a press only: $.ui.view needs the person's own input, and only
 // the terminal draws a main view it can switch.
 async function showAgent($: $, agentId: string | undefined): Promise<void> {
@@ -497,6 +559,7 @@ export const register: Register = on => {
       await update($, agents, () => [])
       await update($, pulses, () => [])
       await update($, expanded, () => [])
+      await update($, transcriptOf, () => null)
       await update($, isClosedByPerson, () => false)
     }
 
@@ -516,6 +579,12 @@ export const register: Register = on => {
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
     if (e.origin.kind === 'person') await update($, isClosedByPerson, () => true)
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('ui.close', { id: TRANSCRIPT_PANE }, async ($, e, next) => {
+    await update($, transcriptOf, () => null)
 
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -637,6 +706,7 @@ export const register: Register = on => {
     const frame = await read($, tick)
     const beats = await read($, pulses)
     const openIds = new Set(await read($, expanded))
+    const transcriptId = await read($, transcriptOf)
     const now = await $.clock.now()
     const viewed = e.props.view.agentId
     const columns = e.props.bodyColumns
@@ -763,6 +833,17 @@ export const register: Register = on => {
               </Text>
             </Box>
           ) : undefined}
+          {row.isWorkflow !== true ? (
+            <Box flexDirection="row" marginTop={space('xs', 0)}>
+              <Button
+                key={`transcript-${row.id}`}
+                variant={row.id === transcriptId ? 'primary' : undefined}
+                onPress={() => void openTranscript($, row)}
+              >
+                {row.id === transcriptId ? 'Transcript open' : 'Open transcript'}
+              </Button>
+            </Box>
+          ) : undefined}
         </Box>
       )
     }
@@ -775,7 +856,7 @@ export const register: Register = on => {
 
     const card = (row: AgentRow, indent: number) => {
       const active = isActive(row.status)
-      const isViewed = row.id === viewed
+      const isViewed = row.id === viewed || row.id === transcriptId
       const isSnug = cardColumns - indent < REGULAR_FROM
       const isOpen = !canView && openIds.has(row.id)
       const meta = [...modelParts(row), ...costParts(row)]
@@ -977,6 +1058,113 @@ export const register: Register = on => {
         ) : undefined}
         {header}
         {list}
+      </Box>
+    )
+  })
+
+  // An agent's transcript, drawn by the mod itself: graphical surfaces have
+  // no main view to switch to it.
+  on('ui.render', { component: 'Pane', requestId: TRANSCRIPT_PANE }, async ($, e) => {
+    const { Box, Button, Markdown, Text } = $.ui.resolve(e)
+    const isTerminal = e.surface === 'terminal'
+    const space = (step: 'xs' | 'sm' | 'md', cells: number): Space =>
+      isTerminal ? cells : step
+    const id = await read($, transcriptOf)
+    // Redraws every second while agents work, so a running transcript grows.
+    await read($, tick)
+    const now = await $.clock.now()
+    const row = (await read($, agents)).find(one => one.id === id)
+
+    const close = (
+      <Button key="close" role="dismiss" onPress={() => void closeTranscript($)}>
+        Close
+      </Button>
+    )
+
+    if (id === null) {
+      return (
+        <Box flexDirection="column" rowGap={space('sm', 1)}>
+          <Text dimColor>Open an agent's card and press Open transcript.</Text>
+          <Box flexDirection="row">{close}</Box>
+        </Box>
+      )
+    }
+
+    const header = (
+      <Box flexDirection="column" rowGap={space('xs', 0)}>
+        <Box flexDirection="row" justifyContent="space-between" columnGap={space('sm', 1)}>
+          <Text wrap="truncate-end">
+            <Text weight="semibold">{row?.type ?? 'Agent'}</Text>
+            {row !== undefined ? (
+              <Text color={COLOR[row.status]} dimColor={COLOR[row.status] === undefined}>
+                {'  '}
+                {MARK[row.status]} {LABEL[row.status]} ·{' '}
+                {formatElapsed((row.endedAt ?? now) - row.startedAt)}
+              </Text>
+            ) : undefined}
+          </Text>
+          {close}
+        </Box>
+        {row !== undefined ? (
+          <Text dimColor size="caption" wrap="truncate-end">
+            {[shortModel(row.model), row.tokens > 0 ? formatTokens(row.tokens) : undefined, plural(row.toolCount, 'tool')]
+              .filter(part => part !== undefined)
+              .join(' · ')}
+          </Text>
+        ) : undefined}
+      </Box>
+    )
+
+    const messages = await $.session.messages({ agentId: id })
+    if (!Array.isArray(messages)) {
+      return (
+        <Box flexDirection="column" rowGap={space('sm', 1)}>
+          {header}
+          <Text color="warning" wrap="wrap">
+            Couldn't read this transcript: {messages.deny}
+          </Text>
+        </Box>
+      )
+    }
+
+    const steps = stepsOf(messages)
+    const hidden = Math.max(0, steps.length - TRANSCRIPT_STEPS)
+
+    const block = (label: string, text: string) => (
+      <Box flexDirection="column">
+        <Text dimColor size="caption">
+          {label}
+        </Text>
+        <Markdown text={text} />
+      </Box>
+    )
+
+    return (
+      <Box flexDirection="column" rowGap={space('sm', 1)}>
+        {header}
+        {steps.length === 0 ? <Text dimColor>No messages yet.</Text> : undefined}
+        {hidden > 0 ? (
+          <Text dimColor size="caption">
+            {plural(hidden, 'earlier step')} not shown
+          </Text>
+        ) : undefined}
+        {steps.slice(-TRANSCRIPT_STEPS).map(step => {
+          if (step.kind === 'task') return block('Task', step.text)
+          if (step.kind === 'message') return block('Message', step.text)
+          if (step.kind !== 'tool') return <Markdown text={step.text} />
+
+          return (
+            <Text
+              size="caption"
+              wrap="truncate-end"
+              color={step.state === 'error' ? 'error' : step.state === 'running' ? ACTIVE : undefined}
+              dimColor={step.state === 'ok'}
+            >
+              {step.state === 'error' ? '✗' : step.state === 'running' ? '◌' : '✓'} {step.label}
+              {step.error !== undefined && step.error !== '' ? ` — ${step.error}` : ''}
+            </Text>
+          )
+        })}
       </Box>
     )
   })

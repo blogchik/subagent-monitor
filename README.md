@@ -43,6 +43,7 @@ A Claude Code mod that shows your running subagents in a live side panel. Every 
 - **Activity sparkline** of the tool calls made by subagents over the last minutes.
 - **Nested agents.** An agent that another agent spawned is listed right after its parent.
 - **Click an agent's name for more.** In the desktop app, VS Code and mobile the card opens in place and shows the full task, the full model id, the start time, the last tool and the start of the agent's answer. In the terminal the click opens the agent's whole transcript.
+- **Transcript pane.** In the desktop app, VS Code and mobile the opened card has an **Open transcript** button that shows the agent's whole conversation in a pane of its own: its task, what it said, and every tool call with its outcome. It grows live while the agent works.
 - **Finish notifications.** A toast appears when an agent finishes, fails or is stopped. Agents that finish together share one toast.
 - **Responsive.** The layout adapts to the pane's width, from compact rows to a grid of up to three columns.
 - **Works on every surface**: SVG creatures in the desktop app, VS Code and mobile, and colored text faces in the terminal.
@@ -92,6 +93,7 @@ There is nothing to configure.
 3. Watch the cards update: the timer ticks, the activity line follows each tool call, and the tokens and tool count grow.
 4. **Click an agent's name** for more:
    - In the **desktop app, VS Code and mobile** (`Explore ▸`), the card opens in place (`▾`) and shows the full task, the full model id, the start time with the tool count, the last tool, the agent id and, once the agent is done, the start of its answer. Click again to close it.
+   - Press **Open transcript** in the opened card to read the agent's whole conversation in a second pane (see [Transcript pane](#transcript-pane)). Press **Close** there to shut it.
    - In the **terminal** (`Explore ↗`), the agent's transcript opens in the main view and the card is marked with `◀`. Click it again, or press **← Back to main chat**, to return.
 5. When an agent finishes, its card turns purple and a toast tells you how long it took and how many tokens it used.
 
@@ -152,9 +154,36 @@ Last tool  Grep · router
 Agent id   a3f9c2e81b7d04c56
 Answer
 Found 12 endpoints under src/routes …
+[ Open transcript ]
 ```
 
 The answer keeps the first 600 characters of the agent's final answer.
+
+### Transcript pane
+
+**Open transcript** opens a second pane, titled after the agent (`Explore · transcript`), that draws the agent's conversation:
+
+```
+Explore  ● running · 0:42                         [ Close ]
+haiku-5-5 · 41.2k tok · 6 tools
+
+Task
+Find the routes and list them with their handlers.
+
+Looking around the router setup first.
+✓ Grep · router
+✗ Read · app.ts — File not found
+◌ Glob · **/*.ts
+Found **3** routes: …
+```
+
+- **Task**: the prompt the agent was given. A later message to the agent (for example from `SendMessage`) shows as **Message**.
+- **What the agent said** is drawn as Markdown, the way a reply is.
+- **Each tool call** is one line: `✓` when it answered, `✗` with the error when it failed, a blue `◌` while it still runs.
+- While the agent works, the pane updates every second.
+- It shows the latest 80 steps and cuts each text at 4,000 characters. A note says how many earlier steps are hidden.
+- The card whose transcript is open is outlined in pink, and its button reads **Transcript open**.
+- Opening another agent's transcript switches the same pane to it.
 
 ## Statuses and colors
 
@@ -167,7 +196,7 @@ The answer keeps the first 600 characters of the agent's final answer.
 | stopped | `■` | your theme's warning color | dimmed border |
 | idle (teammates between turns) | `◌` | dimmed | dimmed border |
 
-In the terminal, the card whose transcript you're viewing is outlined in pink (`#D4537E`). Cards highlight blue on hover.
+The card whose transcript you're viewing (in the main view in the terminal, or in the transcript pane) is outlined in pink (`#D4537E`). Cards highlight blue on hover.
 
 ## Creatures
 
@@ -209,10 +238,10 @@ The header stacks into two lines below 56 cells. On graphical surfaces the spaci
 | Creature | Animated SVG | A colored kaomoji face in the agent's color, for example `(•‿•)`, which blinks every few seconds |
 | Running mark | `●` | A braille spinner `⠋⠙⠹⠸…` |
 | Sparkline | SVG bars | Block characters `▁▂▃▅▇` |
-| Click an agent's name | Opens the card's details in place (`▸` / `▾`) | Opens the agent's transcript (`↗`, then `◀`) |
+| Click an agent's name | Opens the card's details in place (`▸` / `▾`), with an **Open transcript** button | Opens the agent's transcript in the main view (`↗`, then `◀`) |
 | Hover | Card border highlight | Where the terminal reports the pointer |
 
-The difference in clicks comes from Claude Code itself: the desktop app, VS Code and mobile run Claude Code in the background and draw the chat themselves, so there is no main view the mod could switch to an agent's transcript. Only the terminal has one.
+The difference in clicks comes from Claude Code itself: the desktop app, VS Code and mobile run Claude Code in the background and draw the chat themselves, so there is no main view the mod could switch to an agent's transcript. Only the terminal has one. That's why the mod draws the transcript in a pane of its own there.
 
 ## Notifications
 
@@ -240,8 +269,9 @@ Subagent Monitor is a single hooks module (`hooks/register.tsx`) plus a creature
 | `$.agent.list()` | The true status of every agent, read once a second while any agent is active. It also picks up agents that started before the mod loaded |
 | `$.ui.open` and a `Pane` render hook | The panel itself |
 | `$.ui.view({ agentId })` | Opens an agent's transcript when you click its card (terminal only) |
+| `$.session.messages({ agentId })` | The agent's conversation for the transcript pane |
 | `$.ui.toast` | Finish notifications |
-| `$.state` | The agent list, the sparkline, the opened cards and the closed-by-you flag. They survive a reload of the mod within a session |
+| `$.state` | The agent list, the sparkline, the opened cards, the open transcript and the closed-by-you flag. They survive a reload of the mod within a session |
 
 The hooks on spawns, tool calls, model requests and turn ends pass the event on unchanged. The mod only observes them, so it never blocks or changes a tool call, a model request or an agent. Hooks that touch tool calls and spawns carry a `.catch` that simply continues, so a fault in the mod can't stop your agents.
 
@@ -258,6 +288,8 @@ The tunable values are constants at the top of [`hooks/register.tsx`](hooks/regi
 | `TOAST_MS` | `8000` | How long a finish toast stays |
 | `FRESH_MS` | `15000` | How long a finished creature keeps animating |
 | `ANSWER_KEEP` | `600` | Characters of an agent's answer kept for its details |
+| `TRANSCRIPT_STEPS` | `80` | Latest steps the transcript pane shows |
+| `TRANSCRIPT_TEXT_KEEP` | `4000` | Characters of one message the transcript pane shows |
 | `SPARK_BUCKET_MS` | `10000` | Sparkline bucket size |
 | `SNUG_FROM`, `REGULAR_FROM`, `GRID_FROM`, `GRID_CELL` | `36`, `56`, `96`, `48` | Layout breakpoints, in cells |
 
@@ -308,7 +340,9 @@ Use a `claude` binary at least as new as the Claude Code you run the mod in. An 
 
 **The panel doesn't open.** Type `/subagents`. If you closed the panel earlier, it doesn't open by itself again until you do. On a narrow terminal, a pane opened by a plugin may wait until the window is wide enough; `/subagents` tells you why.
 
-**Clicking a card doesn't open the transcript in the desktop app.** That's expected: only the terminal has a main view the mod can switch, so on the desktop app, VS Code and mobile a click opens the card's details instead. To read the full transcript there, use the app's own agent view.
+**Clicking a card doesn't open the transcript in the desktop app.** That's expected: only the terminal has a main view the mod can switch, so on the desktop app, VS Code and mobile a click opens the card's details instead. Press **Open transcript** there to read the whole conversation in the transcript pane.
+
+**"Couldn't read this transcript: …".** Claude Code shares the conversations of subagents, forks and teammates that run in this session. It doesn't share those of agents a workflow run files under the run, so their transcript can't be shown.
 
 **"Couldn't open the transcript: …" in the terminal.** Claude Code opens an agent's transcript only from a click, and only for agents its tasks list shows. A teammate that runs in its own terminal pane can't be opened from the panel.
 
@@ -320,7 +354,7 @@ Use a `claude` binary at least as new as the Claude Code you run the mod in. An 
 
 ## Limitations
 
-- Workflow agents that run remotely send no local events, so they don't appear.
+- Workflow agents that run remotely send no local events, so they don't appear. Workflow agents that run locally do appear, but their transcript can't be read, so their cards have no Open transcript button.
 - The panel has no button to stop an agent.
 - Teammates switch to `idle` between turns and raise no toasts.
 - The agent list belongs to the session: a new session starts with an empty panel.
