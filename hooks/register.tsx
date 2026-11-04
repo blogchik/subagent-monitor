@@ -136,8 +136,10 @@ function formatElapsed(ms: number): string {
 }
 
 function formatTokens(count: number): string {
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M tok`
-  if (count >= 1000) return `${(count / 1000).toFixed(1)}k tok`
+  // Round to 0.1k first, so 999,950 shows as 1.0M rather than 1000.0k.
+  const thousands = Math.round(count / 100) / 10
+  if (thousands >= 1000) return `${(count / 1_000_000).toFixed(1)}M tok`
+  if (count >= 1000) return `${thousands.toFixed(1)}k tok`
 
   return `${count} tok`
 }

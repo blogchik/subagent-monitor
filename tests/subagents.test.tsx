@@ -226,6 +226,27 @@ test("tokens, model and effort come from the agent's own requests", async ($, on
   await ui.unmount()
 })
 
+test('a count just below one million rounds up to 1.0M, not 1000.0k', async ($, on) => {
+  mock.clock(on, { now: 0 })
+  const world = engine(on)
+  await start($)
+  await $.agent.spawn(spawnInput())
+
+  world.setUsage(usage(999_949, 0, 0))
+  await step($, 'a1')
+  let ui = await $.ui.mount({ ...pane(), surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /Σ 999\.9k tok/ })).toBeDefined()
+  await ui.unmount()
+
+  world.setUsage(usage(999_950, 0, 0))
+  await step($, 'a1')
+  ui = await $.ui.mount({ ...pane(), surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /haiku-5-5/ }))?.text).toMatch(/1\.0M tok/)
+  expect(await ui.find({ type: 'Text', text: /Σ 1\.0M tok/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /1000\.0k/ })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('the live activity line and the tool count show', async ($, on) => {
   mock.clock(on, { now: 0 })
   engine(on)
