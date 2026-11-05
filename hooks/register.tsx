@@ -856,6 +856,16 @@ export const register: Register = on => {
       </Text>
     )
 
+    // Name and timer on one line: the name gives way, the timer never does.
+    const titleRow = (row: AgentRow) => (
+      <Box flexDirection="row" justifyContent="space-between" columnGap={space('sm', 1)} minWidth={0}>
+        <Box flexShrink={1} minWidth={0} overflow="hidden">
+          {title(row)}
+        </Box>
+        <Box flexShrink={0}>{clock(row)}</Box>
+      </Box>
+    )
+
     const card = (row: AgentRow, indent: number) => {
       const active = isActive(row.status)
       const isViewed = row.id === viewed || row.id === transcriptId
@@ -863,6 +873,9 @@ export const register: Register = on => {
       const isOpen = !canView && openIds.has(row.id)
       const meta = [...modelParts(row), ...costParts(row)]
 
+      // The card takes its column's width and never its content's: minWidth 0
+      // and overflow hidden keep a long line (a Bash command) from widening it,
+      // so the text truncates inside instead.
       return (
         <Box
           key={`card-${row.id}`}
@@ -876,19 +889,19 @@ export const register: Register = on => {
           paddingX={space('md', 1)}
           paddingY={space('sm', 0)}
           marginLeft={indent}
+          minWidth={0}
+          overflow="hidden"
         >
-          {avatar(row, isSnug ? 36 : 44)}
+          <Box flexShrink={0}>{avatar(row, isSnug ? 36 : 44)}</Box>
           <Box
             flexDirection="column"
             rowGap={space('xs', 0)}
             flexGrow={1}
             flexShrink={1}
             minWidth={0}
+            overflow="hidden"
           >
-            <Box flexDirection="row" justifyContent="space-between" columnGap={space('sm', 1)}>
-              {title(row)}
-              {clock(row)}
-            </Box>
+            {titleRow(row)}
             <Text dimColor={!active} wrap={isOpen ? 'wrap' : 'truncate-end'}>
               {row.description}
             </Text>
@@ -926,11 +939,8 @@ export const register: Register = on => {
         marginLeft={indent}
       >
         {avatar(row, 28)}
-        <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
-          <Box flexDirection="row" justifyContent="space-between" columnGap={space('xs', 1)}>
-            {title(row)}
-            {clock(row)}
-          </Box>
+        <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+          {titleRow(row)}
           {isActive(row.status) && row.activity !== undefined ? (
             stateLine(row)
           ) : (
@@ -1036,8 +1046,16 @@ export const register: Register = on => {
       ) : layout === 'grid' ? (
         <Box flexDirection="row" flexWrap="wrap">
           {placed.map(({ row }) => (
+            // A column cell stretches its card to the cell's width; a row cell
+            // (the default) sized the card by its content, so a long line
+            // pushed it into the next column.
             <Box
+              key={`cell-${row.id}`}
+              flexDirection="column"
               width={`${Math.floor(100 / gridColumns)}%`}
+              flexShrink={0}
+              minWidth={0}
+              overflow="hidden"
               paddingRight={space('sm', 1)}
               paddingBottom={space('sm', 0)}
             >

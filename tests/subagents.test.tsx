@@ -540,6 +540,300 @@ test('a nested agent follows its parent', async ($, on) => {
   await ui.unmount()
 })
 
+// A small model of how a surface lays a drawn tree out across, in cells: the
+// flexbox rules that decide whether a card keeps its column's width. A flex
+// item in a row can't shrink below its content's min-content (a nowrap Text's
+// whole length) unless it has minWidth 0 or overflow hidden; a column
+// stretches its children to its width; overflow hidden clips what is beneath.
+type Drawn = {
+  type: string
+  key: string | undefined
+  props: Record<string, unknown>
+  children: unknown[]
+}
+
+type Laid = {
+  node: Drawn
+  x: number
+  width: number
+  // The right edge of the nearest overflow-hidden ancestor, if any.
+  clip: number
+  textLength: number
+  // The keys of the Boxes it sits in, outermost first.
+  within: string[]
+}
+
+const STEP: Record<string, number> = { xs: 1, sm: 1, md: 2 }
+
+const isDrawn = (value: unknown): value is Drawn =>
+  typeof value === 'object' && value !== null && 'type' in value
+
+// The drawn tree with every element's props and children filled in.
+function norm(value: unknown): unknown {
+  if (!isDrawn(value)) return value
+  const props = (value.props ?? {}) as Record<string, unknown>
+  const key = value.key ?? (typeof props.key === 'string' ? props.key : undefined)
+
+  return { type: value.type, key, props, children: (value.children ?? []).map(norm) }
+}
+
+function cells(value: unknown): number {
+  if (typeof value === 'number') return value
+  if (typeof value === 'string') return STEP[value] ?? 0
+
+  return 0
+}
+
+function textOf(node: unknown): string {
+  if (typeof node === 'string') return node
+  if (!isDrawn(node)) return ''
+
+  return node.children.map(textOf).join('')
+}
+
+const length = (text: string): number => [...text].length
+
+function edges(node: Drawn): { left: number; right: number } {
+  const p = node.props
+  const border = p.borderStyle !== undefined ? 1 : 0
+  const left = cells(p.paddingLeft ?? p.paddingX ?? p.padding) + border
+  const right = cells(p.paddingRight ?? p.paddingX ?? p.padding) + border
+
+  return { left, right }
+}
+
+const margin = (node: Drawn): number =>
+  cells(node.props.marginLeft ?? node.props.marginX ?? node.props.margin)
+
+const direction = (node: Drawn): string =>
+  node.type === 'Box' ? String(node.props.flexDirection ?? 'row') : 'row'
+
+const gapOf = (node: Drawn): number =>
+  cells(
+    direction(node).startsWith('row')
+      ? (node.props.columnGap ?? node.props.gap)
+      : (node.props.rowGap ?? node.props.gap),
+  )
+
+// Widest it would be with room to spare.
+function maxContent(node: unknown, surface: string): number {
+  if (typeof node === 'string') return length(node)
+  if (!isDrawn(node)) return 0
+  if (node.type === 'Svg') {
+    const px = cells(node.props.width)
+
+    return surface === 'terminal' ? px : Math.ceil(px / 8)
+  }
+  if (node.type !== 'Box') {
+    const extra = node.type === 'Button' && node.props.plain !== true ? 4 : 0
+
+    return length(textOf(node)) + extra
+  }
+  const { left, right } = edges(node)
+  const kids = node.children.filter(isDrawn)
+  const sizes = kids.map(kid =>
+    kid.type === 'Box' && typeof kid.props.width === 'number' ? kid.props.width : maxContent(kid, surface) + margin(kid),
+  )
+  const inner = direction(node).startsWith('row')
+    ? sizes.reduce((a, b) => a + b, 0) + gapOf(node) * Math.max(0, kids.length - 1)
+    : Math.max(0, ...sizes)
+
+  return left + right + inner
+}
+
+// Narrowest it can be: a nowrap Text keeps its whole length.
+function minContent(node: unknown, surface: string): number {
+  if (typeof node === 'string') return length(node)
+  if (!isDrawn(node)) return 0
+  if (node.type === 'Text' && node.props.wrap === 'wrap') {
+    return Math.max(0, ...textOf(node).split(/\s+/).map(length))
+  }
+  if (node.type !== 'Box') return maxContent(node, surface)
+  const { left, right } = edges(node)
+  const kids = node.children.filter(isDrawn)
+  const sizes = kids.map(kid =>
+    kid.type === 'Box' && typeof kid.props.width === 'number' ? kid.props.width : minContent(kid, surface) + margin(kid),
+  )
+  const inner = direction(node).startsWith('row')
+    ? sizes.reduce((a, b) => a + b, 0) + gapOf(node) * Math.max(0, kids.length - 1)
+    : Math.max(0, ...sizes)
+
+  return left + right + inner
+}
+
+// The least a flex item in a row shrinks to (its automatic minimum size).
+const floorOf = (node: Drawn, surface: string): number =>
+  node.props.minWidth === 0 || node.props.overflow === 'hidden'
+    ? 0
+    : minContent(node, surface)
+
+function layout(
+  node: Drawn,
+  x: number,
+  width: number,
+  clip: number,
+  surface: string,
+  out: Laid[],
+  within: string[] = [],
+): void {
+  out.push({ node, x, width, clip, textLength: length(textOf(node)), within })
+  if (node.type !== 'Box') return
+  const path = node.key !== undefined ? [...within, node.key] : within
+
+  const { left, right } = edges(node)
+  const innerX = x + left
+  const inner = Math.max(0, width - left - right)
+  const childClip = node.props.overflow === 'hidden' ? Math.min(clip, x + width) : clip
+  const kids = node.children.filter(isDrawn)
+  // A Box's width is in cells; an Svg's is in pixels, measured as content.
+  const percent = (kid: Drawn): number | undefined => {
+    if (kid.type !== 'Box') return undefined
+    const w = kid.props.width
+    if (typeof w === 'number') return w
+    if (typeof w === 'string' && w.endsWith('%')) return Math.floor((inner * parseFloat(w)) / 100)
+
+    return undefined
+  }
+
+  if (!direction(node).startsWith('row')) {
+    for (const kid of kids) {
+      const m = margin(kid)
+      layout(kid, innerX + m, percent(kid) ?? inner - m, childClip, surface, out, path)
+    }
+
+    return
+  }
+
+  if (node.props.flexWrap === 'wrap') {
+    // Each child at its own width, wrapping onto new lines.
+    let lineX = 0
+    for (const kid of kids) {
+      const w = percent(kid) ?? maxContent(kid, surface)
+      if (lineX > 0 && lineX + w > inner) lineX = 0
+      layout(kid, innerX + lineX, w, childClip, surface, out, path)
+      lineX += w
+    }
+
+    return
+  }
+
+  // One flex line: start each item at its content, then grow or shrink.
+  const gap = gapOf(node)
+  const fixed = kids.map(kid => percent(kid))
+  const sizes = kids.map((kid, i) => fixed[i] ?? maxContent(kid, surface))
+  const room = inner - gap * Math.max(0, kids.length - 1)
+  let free = room - sizes.reduce((a, b) => a + b, 0)
+  if (free > 0) {
+    const growers = kids.filter((kid, i) => fixed[i] === undefined && cells(kid.props.flexGrow) > 0)
+    for (const kid of growers) {
+      const i = kids.indexOf(kid)
+      sizes[i] = (sizes[i] ?? 0) + Math.floor(free / growers.length)
+    }
+  }
+  for (let pass = 0; free < 0 && pass < kids.length; pass++) {
+    const open = kids.filter(
+      (kid, i) =>
+        fixed[i] === undefined &&
+        kid.props.flexShrink !== 0 &&
+        (sizes[i] ?? 0) > floorOf(kid, surface),
+    )
+    if (open.length === 0) break
+    const share = Math.ceil(-free / open.length)
+    for (const kid of open) {
+      const i = kids.indexOf(kid)
+      const before = sizes[i] ?? 0
+      const after = Math.max(floorOf(kid, surface), before - share)
+      sizes[i] = after
+      free += before - after
+    }
+  }
+  let at = innerX
+  kids.forEach((kid, i) => {
+    const m = margin(kid)
+    layout(kid, at + m, sizes[i] ?? 0, childClip, surface, out, path)
+    at += m + (sizes[i] ?? 0) + gap
+  })
+}
+
+test('a running card with a long command keeps its column next to a done card', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  engine(on)
+  await start($)
+  await $.agent.spawn(
+    spawnInput({ description: 'Review free AI provider change and every file it touched along the way' }),
+  )
+  await callTool($, {
+    tool: 'Bash',
+    command:
+      'cd "C:/Users/user/Desktop/newsite/.claude/worktrees/agent-review-free-ai-provider" && git diff --stat main...HEAD',
+    agentId: 'a1',
+  })
+  await $.agent.spawn(spawnInput({ tool_use_id: 'call-2', description: 'Implement free AI provider chain' }))
+  await clock.advance(5000)
+  await $.turn.complete({
+    answer: 'Done',
+    durationMs: 5000,
+    isAborted: false,
+    turnId: 't2',
+    agentId: 'a2',
+    reason: 'answer',
+  })
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    for (const columns of [30, 44, 60, 96, 110, 150, 200]) {
+      const ui = await $.ui.mount({ ...pane(undefined, columns), surface })
+      const root = await ui.find({ type: 'Box' })
+      expect(root).toBeDefined()
+      const laid: Laid[] = []
+      layout(norm(root) as Drawn, 0, columns, columns, surface, laid)
+
+      const where = `${surface} at ${columns} columns`
+      const cards = laid.filter(one => one.node.key?.startsWith('card-') === true)
+      const cellsOf = laid.filter(one => one.node.key?.startsWith('cell-') === true)
+      const isGrid = columns >= 96
+      expect({ where, cards: cards.length }).toEqual({ where, cards: columns < 36 ? 0 : 2 })
+      expect({ where, cells: cellsOf.length }).toEqual({ where, cells: isGrid ? 2 : 0 })
+
+      for (const card of cards) {
+        const id = card.node.key
+        const cell = cellsOf.find(one => one.node.key === id?.replace('card-', 'cell-'))
+        // Its column: the grid cell less its gutter, or the pane itself.
+        const limit = cell !== undefined ? cell.x + cell.width - edges(cell.node).right : columns
+        expect({ where, id, right: card.x + card.width }).toEqual({
+          where,
+          id,
+          right: Math.min(card.x + card.width, limit),
+        })
+
+        // Every Text in the card ends inside it on its own, not cut by the
+        // card's edge, and one longer than its room truncates or wraps.
+        const texts = laid.filter(
+          one => one.node.type === 'Text' && id !== undefined && one.within.includes(id),
+        )
+        expect({ where, id, hasTexts: texts.length > 2 }).toEqual({ where, id, hasTexts: true })
+        for (const text of texts) {
+          const shown = textOf(text.node)
+          const fits = text.x + text.width <= card.x + card.width - edges(card.node).right
+          const isCut = text.textLength > text.width
+          const wrap = text.node.props.wrap
+          const truncates = !isCut || wrap === 'truncate-end' || wrap === 'wrap'
+          expect({ where, shown, fits, truncates }).toEqual({ where, shown, fits: true, truncates: true })
+        }
+      }
+
+      // No two cards on a line overlap.
+      const sorted = [...cards].sort((a, b) => a.x - b.x)
+      for (let i = 1; i < sorted.length; i++) {
+        const before = sorted[i - 1]
+        const after = sorted[i]
+        if (before === undefined || after === undefined || cellsOf.length === 0) continue
+        expect({ where, overlap: before.x + before.width > after.x }).toEqual({ where, overlap: false })
+      }
+      await ui.unmount()
+    }
+  }
+})
+
 test('an empty pane shows a sleeping creature and a hint', async ($, on) => {
   on('state.get', () => ({
     value: { value: [{ id: 'old' }], version: 1 },
